@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: 'triton'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:8002']
