@@ -1,3 +1,5 @@
+**Check the [v2_api branch](https://github.com/NVIDIA/healthcare-on-tap-TRT-TRITON-demo/tree/v2_api) for codes using newer TRITON API.**
+
 This repository hosts codes for the [Healthcare on Tap](https://event.on24.com/eventRegistration/EventLobbyServlet?target=reg20.jsp&partnerref=devnws&eventid=2355478&sessionid=1&key=F89A7BE8742F98334CEDDA4E86A6D5F0&regTag=1055756&sourcepage=register) series webinar titled "Deeper Dive into TensorRT and TRITON" recorded on 08/06/2020.
 
 # Setting up the environment
