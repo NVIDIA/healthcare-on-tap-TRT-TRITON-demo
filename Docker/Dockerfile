@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidian/pytorch:20.06-py3
+FROM nvcr.io/nvidian/pytorch:20.11-py3
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -13,13 +13,15 @@ RUN pip install ipywidgets && jupyter nbextension enable --py widgetsnbextension
 RUN pip install netron
 
 # Install TRITON Clients
-ARG TRITON_CLIENTS_URL=https://github.com/NVIDIA/triton-inference-server/releases/download/v1.14.0/v1.14.0_ubuntu1804.clients.tar.gz
-RUN mkdir -p /opt/nvidia/triton-clients \
-    && curl -L ${TRITON_CLIENTS_URL} | tar xvz -C /opt/nvidia/triton-clients
-RUN pip install --no-cache-dir --upgrade setuptools wheel \
-    && pip install --no-cache-dir /opt/nvidia/triton-clients/python/*.whl
+RUN pip install nvidia-pyindex
+RUN pip install tritonclient[all]
 
-# Install GPU dashboards
+# Install MONAI
+RUN pip install monai[all]
 
-RUN pip install jupyterlab-nvdashboard
-# jupyter labextension install jupyterlab-nvdashboard
+# Install PYCUDA
+RUN pip install pycuda
+
+# Install/Enable GPU dashboards
+RUN pip install jupyterlab-nvdashboard 
+RUN PATH="/usr/local/nvm/versions/node/v15.0.1/bin:$PATH" jupyter labextension install jupyterlab-nvdashboard

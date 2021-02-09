@@ -1,4 +1,6 @@
-This repository hosts codes for the [Healthcare on Tap](https://event.on24.com/eventRegistration/EventLobbyServlet?target=reg20.jsp&partnerref=devnws&eventid=2355478&sessionid=1&key=F89A7BE8742F98334CEDDA4E86A6D5F0&regTag=1055756&sourcepage=register) series webinar titled "Deeper Dive into TensorRT and TRITON" recorded on 08/06/2020.
+This brach of the repository hosts *Updated* codes for the [Healthcare on Tap](https://event.on24.com/eventRegistration/EventLobbyServlet?target=reg20.jsp&partnerref=devnws&eventid=2355478&sessionid=1&key=F89A7BE8742F98334CEDDA4E86A6D5F0&regTag=1055756&sourcepage=register) series webinar titled "Deeper Dive into TensorRT and TRITON" recorded on 08/06/2020.
+
+**These codes use newer containers and work with V2 TRITON API. [Check here](https://github.com/triton-inference-server/server/blob/master/docs/v1_to_v2.md) for more details.**
 
 # Setting up the environment
 
@@ -8,7 +10,7 @@ All tests were performed using
 - NVIDIA GPUS (RTX 8000 and V100) with driver 450.57
 ```
 
-Use the startDocker.sh script as follows to mount a data directory and choose GPU 2 for your tests. Current setup uses `nvcr.io/nvidian/pytorch:20.06-py3` as the base image.
+Use the startDocker.sh script as follows to mount a data directory and choose GPU 2 for your tests. Current setup uses `nvcr.io/nvidian/pytorch:20.11-py3` as the base image.
 
 ```
 ./startDocker.sh 2 <PATH_TO_DATA>
@@ -26,7 +28,7 @@ A separate container for the server needs to be launched using the script
 #### TRITON metrics
 <img src="NB_images/TRITON_Metrics_image.png" alt="Drawing" style="width: 300px;"/>
 
-To launch Grafana dashboards for monitoring of metrics, please run `docker-compose up` from the [monitoring](./monitoring/) folder and navigate to [localhost:3000/](http://localhost:3000). Additional steps [here](./monitoring/readme.md).
+To launch Grafana dashboards for monitoring of metrics, please run `docker-compose up` from the [monitoring](./monitoring/) folder and navigate to [localhost:3000/](http://localhost:3000). Additional steps [here](./monitoring/readme.md). **Some metrics for monitoring have changed in the V2 API**.
 
 
 # Notebooks

@@ -34,16 +34,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 # limitations under the License.
 
 import monai
-from monai.transforms import \
-    Compose, LoadNiftid, AddChanneld, ScaleIntensityRanged, CropForegroundd, \
-    RandCropByPosNegLabeld, RandAffined, Spacingd, Orientationd, ToTensord
-from monai.inferers import sliding_window_inference
-from monai.networks.layers import Norm
-from monai.metrics import compute_meandice
-from monai.utils import set_determinism
-# monai.config.print_config()
-
-from typing import Callable, Sequence, Union
+from typing import Any, Callable, List, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -51,29 +42,27 @@ import torch.nn.functional as F
 from monai.data.utils import compute_importance_map, dense_patch_slices, get_valid_patch_size
 from monai.utils import BlendMode, PytorchPadMode, fall_back_tuple
 
-def triton_inferer(batch):
-    results = ctx.run(
-    { 'INPUT__0' : ([batch.cpu().numpy()]) },
-    { 'OUTPUT__0' : (InferContext.ResultFormat.RAW) }
-    )
-    return results['OUTPUT__0'][0]
+__all__ = ["sliding_window_inference_triton"]
 
-def sliding_window_inference_trtis(
+def sliding_window_inference_triton(
     inputs: torch.Tensor,
     roi_size: Union[Sequence[int], int],
     sw_batch_size: int,
-    predictor: Callable,
+    predictor: Callable[..., torch.Tensor],
     overlap: float = 0.25,
     mode: Union[BlendMode, str] = BlendMode.CONSTANT,
+    sigma_scale: Union[Sequence[float], float] = 0.125,
     padding_mode: Union[PytorchPadMode, str] = PytorchPadMode.CONSTANT,
     cval: float = 0.0,
-):
+    sw_device: Union[torch.device, str, None] = None,
+    device: Union[torch.device, str, None] = None,
+    *args: Any,
+    **kwargs: Any,
+) -> torch.Tensor:
     """
     Sliding window inference on `inputs` with `predictor`.
-
     When roi_size is larger than the inputs' spatial size, the input image are padded during inference.
     To maintain the same spatial sizes, the output image will be cropped to the original input size.
-
     Args:
         inputs: input image to be processed (assuming NCHW[D])
         roi_size: the spatial window size for inferences.
@@ -88,21 +77,27 @@ def sliding_window_inference_trtis(
         overlap: Amount of overlap between scans.
         mode: {``"constant"``, ``"gaussian"``}
             How to blend output of overlapping windows. Defaults to ``"constant"``.
-
             - ``"constant``": gives equal weight to all predictions.
             - ``"gaussian``": gives less weight to predictions on edges of windows.
-
+        sigma_scale: the standard deviation coefficient of the Gaussian window when `mode` is ``"gaussian"``.
+            Default: 0.125. Actual window sigma is ``sigma_scale`` * ``dim_size``.
+            When sigma_scale is a sequence of floats, the values denote sigma_scale at the corresponding
+            spatial dimensions.
         padding_mode: {``"constant"``, ``"reflect"``, ``"replicate"``, ``"circular"``}
-            Padding mode when ``roi_size`` is larger than inputs. Defaults to ``"constant"``
+            Padding mode for ``inputs``, when ``roi_size`` is larger than inputs. Defaults to ``"constant"``
             See also: https://pytorch.org/docs/stable/nn.functional.html#pad
         cval: fill value for 'constant' padding mode. Default: 0
-
-    Raises:
-        NotImplementedError: inputs must have batch_size=1.
-
+        sw_device: device for the window data.
+            By default the device (and accordingly the memory) of the `inputs` is used.
+            Normally `sw_device` should be consistent with the device where `predictor` is defined.
+        device: device for the stitched output prediction.
+            By default the device (and accordingly the memory) of the `inputs` is used. If for example
+            set to device=torch.device('cpu') the gpu memory consumption is less and independent of the
+            `inputs` and `roi_size`. Output is on the `device`.
+        args: optional args to be passed to ``predictor``.
+        kwargs: optional keyword args to be passed to ``predictor``.
     Note:
-        - input must be channel-first and have a batch dim, support both spatial 2D and 3D.
-        - currently only supports `inputs` with batch_size=1.
+        - input must be channel-first and have a batch dim, supports N-D sliding window.
     """
     num_spatial_dims = len(inputs.shape) - 2
     assert 0 <= overlap < 1, "overlap must be >= 0 and < 1."
@@ -112,9 +107,10 @@ def sliding_window_inference_trtis(
     image_size_ = list(inputs.shape[2:])
     batch_size = inputs.shape[0]
 
-    # TODO: Enable batch sizes > 1 in future
-    if batch_size > 1:
-        raise NotImplementedError("inputs must have batch_size=1.")
+    if device is None:
+        device = inputs.device
+    if sw_device is None:
+        sw_device = inputs.device
 
     roi_size = fall_back_tuple(roi_size, image_size_)
     # in case that image size is smaller than roi size
@@ -130,84 +126,76 @@ def sliding_window_inference_trtis(
 
     # Store all slices in list
     slices = dense_patch_slices(image_size, roi_size, scan_interval)
+    num_win = len(slices)  # number of windows per image
+    total_slices = num_win * batch_size  # total number of windows
 
-    slice_batches = []
-    for slice_index in range(0, len(slices), sw_batch_size):
-        slice_index_range = range(slice_index, min(slice_index + sw_batch_size, len(slices)))
-        input_slices = []
-        for curr_index in slice_index_range:
-            curr_slice = slices[curr_index]
-            if len(curr_slice) == 3:
-                input_slices.append(inputs[0, :, curr_slice[0], curr_slice[1], curr_slice[2]])
-            else:
-                input_slices.append(inputs[0, :, curr_slice[0], curr_slice[1]])
-        slice_batches.append(torch.stack(input_slices))
+    # Create window-level importance map
+    importance_map = compute_importance_map(
+        get_valid_patch_size(image_size, roi_size), mode=mode, sigma_scale=sigma_scale, device=device
+    )
 
     # Perform predictions
-    output_rois = list()
-    for data in slice_batches:
-        if data.shape[0] != sw_batch_size:
-            pad_dim = sw_batch_size-data.shape[0]
-            print('###',data.shape)
-            data = F.pad(input=data,pad=(0,0,0,0,0,0,0,0,0,pad_dim),mode='constant',value=0)
-            print('###',data.shape)
-            seg_prob = predictor(data)
-            seg_prob = seg_prob[:pad_dim]
-        else: seg_prob = predictor(data)  # batched patch segmentation
-        output_rois.append(seg_prob)
+    output_image, count_map = torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+    _initialized = False
+    for slice_g in range(0, total_slices, sw_batch_size):
+        slice_range = range(slice_g, min(slice_g + sw_batch_size, total_slices))
+        unravel_slice = [
+            [slice(int(idx / num_win), int(idx / num_win) + 1), slice(None)] + list(slices[idx % num_win])
+            for idx in slice_range
+        ]
+        window_data = torch.cat([inputs[win_slice] for win_slice in unravel_slice]).to(sw_device)
+        if window_data.shape[0] != sw_batch_size:
+            pad_dim = sw_batch_size-window_data.shape[0]
+            # print('###',window_data.shape)
+            window_data = F.pad(input=window_data,pad=(0,0,0,0,0,0,0,0,0,pad_dim),mode='constant',value=0)
+            # print('###',window_data.shape)
+            seg_prob = predictor(window_data)
+            # seg_prob = seg_prob[:pad_dim]
+        else: seg_prob = predictor(window_data)  # batched patch segmentation
 
-    # stitching output image
-    output_classes = output_rois[0].shape[1]
-    output_shape = [batch_size, output_classes] + list(image_size)
-
-    # Create importance map
-    importance_map = compute_importance_map(get_valid_patch_size(image_size, roi_size), mode=mode, device=inputs.device)
-
-    # allocate memory to store the full output and the count for overlapping parts
-    output_image = torch.zeros(output_shape, dtype=torch.float32, device=inputs.device)
-    count_map = torch.zeros(output_shape, dtype=torch.float32, device=inputs.device)
-
-    for window_id, slice_index in enumerate(range(0, len(slices), sw_batch_size)):
-        slice_index_range = range(slice_index, min(slice_index + sw_batch_size, len(slices)))
+        if not _initialized:  # init. buffer at the first iteration
+            output_classes = seg_prob.shape[1]
+            output_shape = [batch_size, output_classes] + list(image_size)
+            # allocate memory to store the full output and the count for overlapping parts
+            output_image = torch.zeros(output_shape, dtype=torch.float32, device=device)
+            count_map = torch.zeros(output_shape, dtype=torch.float32, device=device)
+            _initialized = True
 
         # store the result in the proper location of the full output. Apply weights from importance map.
-        for curr_index in slice_index_range:
-            curr_slice = slices[curr_index]
-            if len(curr_slice) == 3:
-                output_image[0, :, curr_slice[0], curr_slice[1], curr_slice[2]] += (
-                    importance_map * output_rois[window_id][curr_index - slice_index, :]
-                )
-                count_map[0, :, curr_slice[0], curr_slice[1], curr_slice[2]] += importance_map
-            else:
-                output_image[0, :, curr_slice[0], curr_slice[1]] += (
-                    importance_map * output_rois[window_id][curr_index - slice_index, :]
-                )
-                count_map[0, :, curr_slice[0], curr_slice[1]] += importance_map
+        for idx, original_idx in zip(slice_range, unravel_slice):
+            output_image[original_idx] += importance_map * seg_prob[idx - slice_g]
+            count_map[original_idx] += importance_map
 
     # account for any overlapping sections
-    output_image /= count_map
+    output_image = output_image / count_map
 
-    if num_spatial_dims == 3:
-        return output_image[
-            ...,
-            pad_size[4] : image_size_[0] + pad_size[4],
-            pad_size[2] : image_size_[1] + pad_size[2],
-            pad_size[0] : image_size_[2] + pad_size[0],
-        ]
-    return output_image[
-        ..., pad_size[2] : image_size_[0] + pad_size[2], pad_size[0] : image_size_[1] + pad_size[0]
-    ]  # 2D
+    final_slicing: List[slice] = []
+    for sp in range(num_spatial_dims):
+        slice_dim = slice(pad_size[sp * 2], image_size_[num_spatial_dims - sp - 1] + pad_size[sp * 2])
+        final_slicing.insert(0, slice_dim)
+    while len(final_slicing) < len(output_image.shape):
+        final_slicing.insert(0, slice(None))
+    return output_image[final_slicing]
 
 
-def _get_scan_interval(image_size, roi_size, num_spatial_dims: int, overlap: float):
-    assert len(image_size) == num_spatial_dims, "image coord different from spatial dims."
-    assert len(roi_size) == num_spatial_dims, "roi coord different from spatial dims."
+def _get_scan_interval(
+    image_size: Sequence[int], roi_size: Sequence[int], num_spatial_dims: int, overlap: float
+) -> Tuple[int, ...]:
+    """
+    Compute scan interval according to the image size, roi size and overlap.
+    Scan interval will be `int((1 - overlap) * roi_size)`, if interval is 0,
+    use 1 instead to make sure sliding window works.
+    """
+    if len(image_size) != num_spatial_dims:
+        raise ValueError("image coord different from spatial dims.")
+    if len(roi_size) != num_spatial_dims:
+        raise ValueError("roi coord different from spatial dims.")
 
     scan_interval = []
     for i in range(num_spatial_dims):
         if roi_size[i] == image_size[i]:
             scan_interval.append(int(roi_size[i]))
         else:
-            # scan interval is (1-overlap)*roi_size
-            scan_interval.append(int(roi_size[i] * (1 - overlap)))
+            interval = int(roi_size[i] * (1 - overlap))
+            scan_interval.append(interval if interval > 0 else 1)
     return tuple(scan_interval)

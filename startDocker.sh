@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #build docker Image
-DOCKER_IMAGE="hcot_inference_demo"
-docker build -t hcot_inference_demo ./Docker/
+DOCKER_IMAGE="hcot_inference_demo_v2"
+docker build -t $DOCKER_IMAGE ./Docker/
 
 
 
@@ -18,7 +18,7 @@ echo -----------------------------------
 extraFlag="-it --ipc=host --net=host"
 cmd2run="/bin/bash"
 
-echo Please run "./start_jupyter_lab.sh" to enable lab extensions and start the JupyterLab
+# echo Please run "./start_jupyter_lab.sh" to enable lab extensions and start the JupyterLab
 
 echo $DOCKER_IMAGE
 
